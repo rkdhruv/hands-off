@@ -11,6 +11,7 @@ Mapping (per proposal):
   fist        -> Spotify/Music play/pause via AppleScript
   double fist -> Spotify/Music skip to next track
   peace sign  -> Cmd+Shift+3  full-screen screenshot
+  pinch       -> volume control (continuous: hand y while held = volume)
 
 Focus the video window and press q to quit.
 """
@@ -39,6 +40,10 @@ PEACE_HOLD_FRAMES = 4
 PEACE_EXTENDED_RATIO = 1.4
 PEACE_CURLED_RATIO = 1.0
 STATIONARY_DISP = 0.05
+
+PINCH_RATIO = 0.30           # thumb-tip to index-tip distance / hand size
+VOLUME_SENSITIVITY = 200.0   # how much wrist y-delta maps to volume %
+VOLUME_STEP = 2              # min absolute change before re-firing osascript
 
 GESTURE_KEYS = {
     "swipe_left":  (124, "using control down"),
@@ -112,6 +117,34 @@ def is_peace(hand):
     return index_ext and middle_ext and ring_curl and pinky_curl
 
 
+def is_pinch(hand):
+    lm = hand.landmark
+    thumb = np.array([lm[4].x, lm[4].y])
+    index = np.array([lm[8].x, lm[8].y])
+    wrist = np.array([lm[0].x, lm[0].y])
+    mid_mcp = np.array([lm[9].x, lm[9].y])
+    pinch_d = np.linalg.norm(thumb - index)
+    hand_size = max(np.linalg.norm(wrist - mid_mcp), 1e-6)
+    middle_extended = _finger_ratio(hand, 12, 9) > 1.4
+    return (pinch_d / hand_size) < PINCH_RATIO and middle_extended
+
+
+def get_volume():
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "output volume of (get volume settings)"],
+            capture_output=True, text=True, timeout=1,
+        )
+        return int(result.stdout.strip())
+    except Exception:
+        return 50
+
+
+def set_volume(v):
+    v = max(0, min(100, int(v)))
+    subprocess.Popen(["osascript", "-e", f"set volume output volume {v}"])
+
+
 def is_stationary(buffer):
     if len(buffer) < BUFFER_FRAMES:
         return False
@@ -156,6 +189,10 @@ def main():
     pending_fist_fire = None  # deadline to fire playpause if no second clench arrives
     peace_streak = 0
     peace_armed = True
+    pinching = False
+    pinch_start_y = 0.0
+    pinch_start_volume = 50
+    last_set_volume = 50
 
     while True:
         ok, frame = cap.read()
@@ -166,6 +203,8 @@ def main():
 
         fist_now = False
         peace_now = False
+        pinch_now = False
+        hl = None
         if result.multi_hand_landmarks:
             hl = result.multi_hand_landmarks[0]
             wrist = hl.landmark[WRIST]
@@ -173,6 +212,7 @@ def main():
             mp_drawing.draw_landmarks(frame, hl, mp_hands.HAND_CONNECTIONS)
             fist_now = is_fist(hl)
             peace_now = is_peace(hl)
+            pinch_now = is_pinch(hl)
         else:
             buffer.clear()
 
@@ -189,9 +229,32 @@ def main():
             peace_armed = True
 
         now = time.time()
-        fist_rising = fist_armed and fist_streak >= FIST_HOLD_FRAMES
 
-        if fist_rising:
+        if pinch_now and not pinching:
+            pinching = True
+            pinch_start_y = hl.landmark[WRIST].y
+            pinch_start_volume = get_volume()
+            last_set_volume = pinch_start_volume
+            last_label = f"volume mode @ {pinch_start_volume}"
+            buffer.clear()
+        elif pinching and pinch_now:
+            current_y = hl.landmark[WRIST].y
+            dy = pinch_start_y - current_y
+            target = max(0.0, min(100.0, pinch_start_volume + dy * VOLUME_SENSITIVITY))
+            if abs(target - last_set_volume) >= VOLUME_STEP:
+                set_volume(target)
+                last_set_volume = target
+            last_label = f"volume: {int(last_set_volume)}"
+        elif pinching and not pinch_now:
+            pinching = False
+            last_label = f"volume set: {int(last_set_volume)}"
+            buffer.clear()
+
+        fist_rising = (not pinching) and fist_armed and fist_streak >= FIST_HOLD_FRAMES
+
+        if pinching:
+            pass
+        elif fist_rising:
             fist_armed = False
             if pending_fist_fire is not None:
                 fire("fist_double")
@@ -234,10 +297,13 @@ def main():
         cooldown_left = max(0.0, COOLDOWN_S - (now - last_fired))
         mc_status = "MC open" if mc_open else "MC closed"
         fist_status = f"fist:{'Y' if fist_now else 'N'} streak:{fist_streak} armed:{'Y' if fist_armed else 'N'}"
+        pinch_status = f"pinch:{'Y' if pinch_now else 'N'} mode:{'ON' if pinching else 'off'}"
         cv2.putText(frame, f"last: {last_label}   cooldown: {cooldown_left:.2f}s   {mc_status}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
         cv2.putText(frame, fist_status,
                     (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+        cv2.putText(frame, pinch_status,
+                    (10, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 1)
         cv2.putText(frame, "[r] reset MC state",
                     (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1)
         cv2.imshow("hands-off live", frame)

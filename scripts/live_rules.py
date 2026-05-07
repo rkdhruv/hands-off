@@ -10,6 +10,7 @@ Mapping (per proposal):
   swipe down  -> Escape      dismiss Mission Control
   fist        -> Spotify/Music play/pause via AppleScript
   double fist -> Spotify/Music skip to next track
+  peace sign  -> Cmd+Shift+3  full-screen screenshot
 
 Focus the video window and press q to quit.
 """
@@ -34,11 +35,17 @@ FIST_RATIO = 1.0
 FIST_HOLD_FRAMES = 4
 DOUBLE_FIST_WINDOW = 0.6
 
+PEACE_HOLD_FRAMES = 4
+PEACE_EXTENDED_RATIO = 1.4
+PEACE_CURLED_RATIO = 1.0
+STATIONARY_DISP = 0.05
+
 GESTURE_KEYS = {
     "swipe_left":  (124, "using control down"),
     "swipe_right": (123, "using control down"),
     "swipe_up":    (126, "using control down"),
     "swipe_down":  (53,  ""),
+    "peace":       (20,  "using {command down, shift down}"),
 }
 
 PLAYPAUSE_SCRIPT = '''
@@ -89,6 +96,30 @@ def is_fist(hand):
     return curled == 4
 
 
+def _finger_ratio(hand, tip_i, mcp_i):
+    lm = hand.landmark
+    wrist = np.array([lm[0].x, lm[0].y])
+    tip = np.array([lm[tip_i].x, lm[tip_i].y])
+    mcp = np.array([lm[mcp_i].x, lm[mcp_i].y])
+    return np.linalg.norm(tip - wrist) / max(np.linalg.norm(mcp - wrist), 1e-6)
+
+
+def is_peace(hand):
+    index_ext  = _finger_ratio(hand,  8,  5) > PEACE_EXTENDED_RATIO
+    middle_ext = _finger_ratio(hand, 12,  9) > PEACE_EXTENDED_RATIO
+    ring_curl  = _finger_ratio(hand, 16, 13) < PEACE_CURLED_RATIO
+    pinky_curl = _finger_ratio(hand, 20, 17) < PEACE_CURLED_RATIO
+    return index_ext and middle_ext and ring_curl and pinky_curl
+
+
+def is_stationary(buffer):
+    if len(buffer) < BUFFER_FRAMES:
+        return False
+    arr = np.array(buffer)
+    return (abs(arr[-1, 0] - arr[0, 0]) < STATIONARY_DISP
+            and abs(arr[-1, 1] - arr[0, 1]) < STATIONARY_DISP)
+
+
 def detect(buffer):
     if len(buffer) < BUFFER_FRAMES:
         return None
@@ -123,6 +154,8 @@ def main():
     fist_streak = 0
     fist_armed = True  # only fire fist on rising edge after release
     pending_fist_fire = None  # deadline to fire playpause if no second clench arrives
+    peace_streak = 0
+    peace_armed = True
 
     while True:
         ok, frame = cap.read()
@@ -132,12 +165,14 @@ def main():
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
         fist_now = False
+        peace_now = False
         if result.multi_hand_landmarks:
             hl = result.multi_hand_landmarks[0]
             wrist = hl.landmark[WRIST]
             buffer.append((wrist.x, wrist.y))
             mp_drawing.draw_landmarks(frame, hl, mp_hands.HAND_CONNECTIONS)
             fist_now = is_fist(hl)
+            peace_now = is_peace(hl)
         else:
             buffer.clear()
 
@@ -146,6 +181,12 @@ def main():
         else:
             fist_streak = 0
             fist_armed = True
+
+        if peace_now:
+            peace_streak += 1
+        else:
+            peace_streak = 0
+            peace_armed = True
 
         now = time.time()
         fist_rising = fist_armed and fist_streak >= FIST_HOLD_FRAMES
@@ -166,6 +207,12 @@ def main():
             pending_fist_fire = None
             last_fired = now
             last_label = "fist"
+            buffer.clear()
+        elif peace_armed and peace_streak >= PEACE_HOLD_FRAMES and is_stationary(buffer):
+            fire("peace")
+            peace_armed = False
+            last_fired = now
+            last_label = "peace"
             buffer.clear()
         elif now - last_fired >= COOLDOWN_S:
             label = detect(buffer)

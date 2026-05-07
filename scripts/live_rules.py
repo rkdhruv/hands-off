@@ -8,6 +8,8 @@ Mapping (per proposal):
   swipe right -> Ctrl+Left   previous desktop  (hand pushes view left)
   swipe up    -> Ctrl+Up     Mission Control
   swipe down  -> Escape      dismiss Mission Control
+  fist        -> Spotify/Music play/pause via AppleScript
+  double fist -> Spotify/Music skip to next track
 
 Focus the video window and press q to quit.
 """
@@ -27,6 +29,11 @@ DOMINANCE = 1.2
 COOLDOWN_S = 1.0
 WRIST = 0
 
+FINGER_TIP_MCP = [(8, 5), (12, 9), (16, 13), (20, 17)]
+FIST_RATIO = 1.0
+FIST_HOLD_FRAMES = 4
+DOUBLE_FIST_WINDOW = 0.6
+
 GESTURE_KEYS = {
     "swipe_left":  (124, "using control down"),
     "swipe_right": (123, "using control down"),
@@ -34,12 +41,52 @@ GESTURE_KEYS = {
     "swipe_down":  (53,  ""),
 }
 
+PLAYPAUSE_SCRIPT = '''
+try
+    if application "Spotify" is running then
+        tell application "Spotify" to playpause
+    else if application "Music" is running then
+        tell application "Music" to playpause
+    end if
+end try
+'''
+
+NEXT_TRACK_SCRIPT = '''
+try
+    if application "Spotify" is running then
+        tell application "Spotify" to next track
+    else if application "Music" is running then
+        tell application "Music" to next track
+    end if
+end try
+'''
+
 
 def fire(label):
+    if label == "fist":
+        print(f"[{time.strftime('%H:%M:%S')}] fist -> playpause")
+        subprocess.run(["osascript", "-e", PLAYPAUSE_SCRIPT], check=False)
+        return
+    if label == "fist_double":
+        print(f"[{time.strftime('%H:%M:%S')}] double fist -> next track")
+        subprocess.run(["osascript", "-e", NEXT_TRACK_SCRIPT], check=False)
+        return
     key_code, modifier = GESTURE_KEYS[label]
     print(f"[{time.strftime('%H:%M:%S')}] {label} -> key {key_code} {modifier}".rstrip())
     cmd = f'tell application "System Events" to key code {key_code} {modifier}'.strip()
     subprocess.run(["osascript", "-e", cmd], check=False)
+
+
+def is_fist(hand):
+    lm = hand.landmark
+    wrist = np.array([lm[0].x, lm[0].y])
+    curled = 0
+    for tip_i, mcp_i in FINGER_TIP_MCP:
+        tip = np.array([lm[tip_i].x, lm[tip_i].y])
+        mcp = np.array([lm[mcp_i].x, lm[mcp_i].y])
+        if np.linalg.norm(tip - wrist) < FIST_RATIO * np.linalg.norm(mcp - wrist):
+            curled += 1
+    return curled == 4
 
 
 def detect(buffer):
@@ -73,6 +120,9 @@ def main():
     last_fired = 0.0
     last_label = "ready"
     mc_open = False
+    fist_streak = 0
+    fist_armed = True  # only fire fist on rising edge after release
+    pending_fist_fire = None  # deadline to fire playpause if no second clench arrives
 
     while True:
         ok, frame = cap.read()
@@ -81,16 +131,43 @@ def main():
         frame = cv2.flip(frame, 1)
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+        fist_now = False
         if result.multi_hand_landmarks:
             hl = result.multi_hand_landmarks[0]
             wrist = hl.landmark[WRIST]
             buffer.append((wrist.x, wrist.y))
             mp_drawing.draw_landmarks(frame, hl, mp_hands.HAND_CONNECTIONS)
+            fist_now = is_fist(hl)
         else:
             buffer.clear()
 
+        if fist_now:
+            fist_streak += 1
+        else:
+            fist_streak = 0
+            fist_armed = True
+
         now = time.time()
-        if now - last_fired >= COOLDOWN_S:
+        fist_rising = fist_armed and fist_streak >= FIST_HOLD_FRAMES
+
+        if fist_rising:
+            fist_armed = False
+            if pending_fist_fire is not None:
+                fire("fist_double")
+                pending_fist_fire = None
+                last_fired = now
+                last_label = "fist_double"
+                buffer.clear()
+            else:
+                pending_fist_fire = now + DOUBLE_FIST_WINDOW
+                last_label = "fist (pending)"
+        elif pending_fist_fire is not None and now >= pending_fist_fire:
+            fire("fist")
+            pending_fist_fire = None
+            last_fired = now
+            last_label = "fist"
+            buffer.clear()
+        elif now - last_fired >= COOLDOWN_S:
             label = detect(buffer)
             if label == "swipe_up" and mc_open:
                 label = None
@@ -109,8 +186,11 @@ def main():
 
         cooldown_left = max(0.0, COOLDOWN_S - (now - last_fired))
         mc_status = "MC open" if mc_open else "MC closed"
+        fist_status = f"fist:{'Y' if fist_now else 'N'} streak:{fist_streak} armed:{'Y' if fist_armed else 'N'}"
         cv2.putText(frame, f"last: {last_label}   cooldown: {cooldown_left:.2f}s   {mc_status}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+        cv2.putText(frame, fist_status,
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
         cv2.putText(frame, "[r] reset MC state",
                     (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1)
         cv2.imshow("hands-off live", frame)

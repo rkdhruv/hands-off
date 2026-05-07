@@ -61,10 +61,11 @@ Gestures (frame is mirrored, so directions match your physical hand):
 | swipe hand down                             | `Esc` — close Mission Control            |
 | fist (clench and hold ~4 frames)            | Spotify / Apple Music **play-pause**     |
 | double fist (two clenches within 0.6 s)     | Spotify / Apple Music **next track**     |
+| peace sign (V — index + middle, held still) | `Cmd+Shift+3` — full-screen screenshot   |
 
 A `mc_open` flag tracks Mission Control state so swipe-up doesn't refire while MC is already open, and swipe-down only fires when it is. Press `r` if the state ever gets out of sync. A 1-second cooldown after every fire prevents the same gesture from triggering repeatedly.
 
-Tunables at the top of the file if detection feels too sensitive or too sluggish: `BUFFER_FRAMES`, `SWIPE_DX` / `SWIPE_DY` (motion thresholds), `DOMINANCE` (how strongly one axis must dominate the other), `COOLDOWN_S`, `FIST_HOLD_FRAMES`, `DOUBLE_FIST_WINDOW`.
+Tunables at the top of the file if detection feels too sensitive or too sluggish: `BUFFER_FRAMES`, `SWIPE_DX` / `SWIPE_DY` (motion thresholds), `DOMINANCE` (how strongly one axis must dominate the other), `COOLDOWN_S`, `FIST_HOLD_FRAMES`, `DOUBLE_FIST_WINDOW`, `PEACE_HOLD_FRAMES`, `PEACE_EXTENDED_RATIO` / `PEACE_CURLED_RATIO` (per-finger pose thresholds), `STATIONARY_DISP` (max wrist drift while a pose gesture is held).
 
 Run:
 
